@@ -126,414 +126,13 @@ class ClipboardManager {
     }
 }
 
-// MARK: - HighlightRowView
-
-class HighlightRowView: NSView {
-    var textLabel: NSTextField?
-    var shortcutLabel: NSTextField?
-    private var trackingArea: NSTrackingArea?
-    private var isHighlighted = false
-
-    override func updateTrackingAreas() {
-        super.updateTrackingAreas()
-        if let existing = trackingArea { removeTrackingArea(existing) }
-        trackingArea = NSTrackingArea(
-            rect: bounds,
-            options: [.mouseEnteredAndExited, .activeAlways],
-            owner: self, userInfo: nil)
-        addTrackingArea(trackingArea!)
-    }
-
-    override func mouseEntered(with event: NSEvent) {
-        isHighlighted = true
-        layer?.backgroundColor = NSColor.white.withAlphaComponent(0.08).cgColor
-    }
-
-    override func mouseExited(with event: NSEvent) {
-        isHighlighted = false
-        layer?.backgroundColor = nil
-    }
-}
-
-// MARK: - PopupPanel (nonactivating — doesn't steal focus)
-
-class PopupPanel: NSPanel {
-    var onSelect: ((Int) -> Void)?
-    var onDismiss: (() -> Void)?
-    private var rowViews: [NSView] = []
-    private var clearRow: NSView?
-    private var quitRow: NSView?
-    private var highlightedIndex: Int = -1
-    private var keyMonitor: Any?
-    private var clickMonitor: Any?
-    private var globalMonitor: Any?
-
-    init() {
-        super.init(contentRect: NSRect(x: 0, y: 0, width: 340, height: 10),
-                   styleMask: [.borderless, .nonactivatingPanel],
-                   backing: .buffered, defer: false)
-        self.isFloatingPanel = true
-        self.level = .statusBar
-        self.isOpaque = false
-        self.backgroundColor = .clear
-        self.hasShadow = true
-        self.hidesOnDeactivate = false
-        self.collectionBehavior = [.auxiliary, .stationary, .moveToActiveSpace, .fullScreenAuxiliary]
-    }
-
-    func showBelow(statusItemButton button: NSStatusBarButton, items: [ClipboardItem]) {
-        rowViews.removeAll()
-        highlightedIndex = -1
-
-        let panelWidth: CGFloat = 340
-        let rowWidth: CGFloat = panelWidth - 16 // 8pt padding each side
-
-        let effectView = NSVisualEffectView()
-        effectView.material = .hudWindow
-        effectView.blendingMode = .behindWindow
-        effectView.state = .active
-        effectView.appearance = NSAppearance(named: .darkAqua)
-        effectView.wantsLayer = true
-        effectView.layer?.cornerRadius = 10
-        effectView.layer?.masksToBounds = true
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 0
-        stack.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
-
-        // Title row
-        let titleLabel = NSTextField(labelWithString: "Clipotron")
-        titleLabel.font = NSFont.systemFont(ofSize: 14, weight: .bold)
-        titleLabel.textColor = .labelColor
-        let titleRow = NSView()
-        titleRow.addSubview(titleLabel)
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-
-        let toggle = NSSwitch()
-        toggle.state = ClipboardManager.shared.enabled ? .on : .off
-        toggle.target = self
-        toggle.action = #selector(PopupPanel.toggleEnabled(_:))
-        toggle.translatesAutoresizingMaskIntoConstraints = false
-        titleRow.addSubview(toggle)
-
-        NSLayoutConstraint.activate([
-            titleLabel.leadingAnchor.constraint(equalTo: titleRow.leadingAnchor, constant: 12),
-            titleLabel.centerYAnchor.constraint(equalTo: titleRow.centerYAnchor),
-            toggle.trailingAnchor.constraint(equalTo: titleRow.trailingAnchor, constant: -8),
-            toggle.centerYAnchor.constraint(equalTo: titleRow.centerYAnchor),
-            titleRow.heightAnchor.constraint(equalToConstant: 36),
-        ])
-        stack.addArrangedSubview(titleRow)
-        titleRow.translatesAutoresizingMaskIntoConstraints = false
-        titleRow.widthAnchor.constraint(equalToConstant: rowWidth).isActive = true
-
-        // Separator between title and items (if any)
-        if !items.isEmpty {
-            let topSepContainer = NSView()
-            let topSep = NSBox()
-            topSep.boxType = .separator
-            topSep.translatesAutoresizingMaskIntoConstraints = false
-            topSepContainer.addSubview(topSep)
-            NSLayoutConstraint.activate([
-                topSep.leadingAnchor.constraint(equalTo: topSepContainer.leadingAnchor, constant: 4),
-                topSep.trailingAnchor.constraint(equalTo: topSepContainer.trailingAnchor, constant: -4),
-                topSep.centerYAnchor.constraint(equalTo: topSepContainer.centerYAnchor),
-                topSepContainer.heightAnchor.constraint(equalToConstant: 9),
-            ])
-            stack.addArrangedSubview(topSepContainer)
-            topSepContainer.translatesAutoresizingMaskIntoConstraints = false
-            topSepContainer.widthAnchor.constraint(equalToConstant: rowWidth).isActive = true
-        }
-
-        for (i, item) in items.enumerated() {
-            let row = makeRow(index: i, item: item)
-            stack.addArrangedSubview(row)
-            row.translatesAutoresizingMaskIntoConstraints = false
-            row.widthAnchor.constraint(equalToConstant: rowWidth).isActive = true
-            rowViews.append(row)
-        }
-
-        // Separator
-        let separatorContainer = NSView()
-        let separator = NSBox()
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        separatorContainer.addSubview(separator)
-        NSLayoutConstraint.activate([
-            separator.leadingAnchor.constraint(equalTo: separatorContainer.leadingAnchor, constant: 4),
-            separator.trailingAnchor.constraint(equalTo: separatorContainer.trailingAnchor, constant: -4),
-            separator.centerYAnchor.constraint(equalTo: separatorContainer.centerYAnchor),
-            separatorContainer.heightAnchor.constraint(equalToConstant: 9),
-        ])
-        stack.addArrangedSubview(separatorContainer)
-        separatorContainer.translatesAutoresizingMaskIntoConstraints = false
-        separatorContainer.widthAnchor.constraint(equalToConstant: rowWidth).isActive = true
-
-        // Clear row
-        let cr = makeActionRow(title: "Clear")
-        stack.addArrangedSubview(cr)
-        cr.translatesAutoresizingMaskIntoConstraints = false
-        cr.widthAnchor.constraint(equalToConstant: rowWidth).isActive = true
-        self.clearRow = cr
-
-        // Quit row
-        let qr = makeActionRow(title: "Quit")
-        stack.addArrangedSubview(qr)
-        qr.translatesAutoresizingMaskIntoConstraints = false
-        qr.widthAnchor.constraint(equalToConstant: rowWidth).isActive = true
-        self.quitRow = qr
-
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        effectView.addSubview(stack)
-        NSLayoutConstraint.activate([
-            stack.topAnchor.constraint(equalTo: effectView.topAnchor),
-            stack.bottomAnchor.constraint(equalTo: effectView.bottomAnchor),
-            stack.leadingAnchor.constraint(equalTo: effectView.leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: effectView.trailingAnchor),
-        ])
-
-        self.contentView = effectView
-
-        // Calculate size: title(36) + topSep?(9) + items(28 each) + separator(9) + clear(28) + quit(28) + padding(16)
-        let itemRowHeight: CGFloat = 28
-        let titleHeight: CGFloat = 36
-        let separatorHeight: CGFloat = 9
-        let topSepHeight: CGFloat = items.isEmpty ? 0 : separatorHeight
-        let totalHeight = titleHeight + topSepHeight + CGFloat(items.count) * itemRowHeight + separatorHeight + 2 * itemRowHeight + 16
-        let panelSize = NSSize(width: panelWidth, height: totalHeight)
-
-        // Position below the status item button, left-aligned to icon
-        guard let buttonWindow = button.window else { return }
-        let buttonRect = buttonWindow.convertToScreen(button.convert(button.bounds, to: nil))
-        var origin = NSPoint(x: buttonRect.minX,
-                             y: buttonRect.minY - totalHeight - 4)
-
-        // Keep on screen
-        if let screen = NSScreen.main {
-            let frame = screen.visibleFrame
-            if origin.x < frame.minX { origin.x = frame.minX + 4 }
-            if origin.x + panelSize.width > frame.maxX { origin.x = frame.maxX - panelSize.width - 4 }
-            if origin.y < frame.minY { origin.y = frame.minY + 4 }
-        }
-
-        self.setFrame(NSRect(origin: origin, size: panelSize), display: true)
-        self.orderFrontRegardless()
-
-        setupMonitors()
-    }
-
-    private func makeRow(index: Int, item: ClipboardItem) -> NSView {
-        let row = HighlightRowView()
-        row.wantsLayer = true
-        row.layer?.cornerRadius = 4
-
-        let height: CGFloat = 28
-
-        // Shortcut hint on the right
-        let shortcutLabel = NSTextField(labelWithString: "\u{2318}\(index + 1)")
-        shortcutLabel.font = NSFont.systemFont(ofSize: 11)
-        shortcutLabel.textColor = NSColor.secondaryLabelColor.withAlphaComponent(0.7)
-        shortcutLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
-        shortcutLabel.setContentHuggingPriority(.required, for: .horizontal)
-        shortcutLabel.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(shortcutLabel)
-        row.shortcutLabel = shortcutLabel
-
-        switch item {
-        case .text(_):
-            let textLabel = NSTextField(labelWithString: item.menuTitle)
-            textLabel.font = NSFont.systemFont(ofSize: 13)
-            textLabel.textColor = .labelColor
-            textLabel.lineBreakMode = .byTruncatingTail
-            textLabel.translatesAutoresizingMaskIntoConstraints = false
-            row.addSubview(textLabel)
-            row.textLabel = textLabel
-
-            NSLayoutConstraint.activate([
-                textLabel.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 12),
-                textLabel.trailingAnchor.constraint(equalTo: shortcutLabel.leadingAnchor, constant: -4),
-                textLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-                shortcutLabel.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -8),
-                shortcutLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-                row.heightAnchor.constraint(equalToConstant: height),
-            ])
-
-        case .image(let img, let sizeLabel):
-            let thumb = makeThumbnail(image: img, height: 18)
-            let imageView = NSImageView()
-            imageView.image = thumb
-            imageView.imageScaling = .scaleProportionallyUpOrDown
-            imageView.translatesAutoresizingMaskIntoConstraints = false
-            row.addSubview(imageView)
-
-            let sizeField = NSTextField(labelWithString: sizeLabel)
-            sizeField.font = NSFont.systemFont(ofSize: 11)
-            sizeField.textColor = .secondaryLabelColor
-            sizeField.translatesAutoresizingMaskIntoConstraints = false
-            row.addSubview(sizeField)
-            row.textLabel = sizeField
-
-            NSLayoutConstraint.activate([
-                imageView.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 12),
-                imageView.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-                imageView.heightAnchor.constraint(equalToConstant: 18),
-                imageView.widthAnchor.constraint(lessThanOrEqualToConstant: 40),
-                sizeField.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 6),
-                sizeField.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-                shortcutLabel.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -8),
-                shortcutLabel.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-                row.heightAnchor.constraint(equalToConstant: height),
-            ])
-        }
-
-        return row
-    }
-
-    private func makeActionRow(title: String) -> NSView {
-        let row = HighlightRowView()
-        row.wantsLayer = true
-        row.layer?.cornerRadius = 4
-
-        let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 13)
-        label.textColor = .labelColor
-        label.translatesAutoresizingMaskIntoConstraints = false
-        row.addSubview(label)
-        row.textLabel = label
-
-        NSLayoutConstraint.activate([
-            label.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 12),
-            label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
-            row.heightAnchor.constraint(equalToConstant: 28),
-        ])
-
-        return row
-    }
-
-    private func makeThumbnail(image: NSImage, height: CGFloat) -> NSImage {
-        let ratio = height / image.size.height
-        let width = image.size.width * ratio
-        let thumbSize = NSSize(width: min(width, 60), height: height)
-        let thumb = NSImage(size: thumbSize)
-        thumb.lockFocus()
-        image.draw(in: NSRect(origin: .zero, size: thumbSize),
-                   from: NSRect(origin: .zero, size: image.size),
-                   operation: .copy, fraction: 1.0)
-        thumb.unlockFocus()
-        return thumb
-    }
-
-    private func setupMonitors() {
-        removeMonitors()
-
-        // Local monitor for key events
-        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
-            return self?.handleKeyEvent(event)
-        }
-
-        // Local mouse clicks on the panel
-        clickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
-            self?.handleClick(event)
-            return event
-        }
-
-        // Global monitor for clicks outside the panel
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
-            self?.dismiss()
-        }
-    }
-
-    private func handleKeyEvent(_ event: NSEvent) -> NSEvent? {
-        let key = event.charactersIgnoringModifiers ?? ""
-        if let num = Int(key), num >= 1, num <= 4 {
-            selectAndPaste(index: num - 1)
-            return nil
-        }
-        if event.keyCode == 53 { // Escape
-            dismiss()
-            return nil
-        }
-        return event
-    }
-
-    private func handleClick(_ event: NSEvent) {
-        guard event.window === self else { return }
-        guard let contentView = self.contentView else { return }
-        let loc = contentView.convert(event.locationInWindow, from: nil)
-
-        for (i, row) in rowViews.enumerated() {
-            let rowFrame = row.convert(row.bounds, to: contentView)
-            if rowFrame.contains(loc) {
-                selectAndPaste(index: i)
-                return
-            }
-        }
-
-        if let cr = clearRow {
-            let frame = cr.convert(cr.bounds, to: contentView)
-            if frame.contains(loc) {
-                ClipboardManager.shared.history.removeAll()
-                dismiss()
-                return
-            }
-        }
-
-        if let qr = quitRow {
-            let frame = qr.convert(qr.bounds, to: contentView)
-            if frame.contains(loc) {
-                dismiss()
-                NSApplication.shared.terminate(nil)
-                return
-            }
-        }
-    }
-
-    private var pasting = false
-
-    func selectAndPaste(index: Int) {
-        guard !pasting else { return }
-        guard index >= 0, index < ClipboardManager.shared.history.count else { return }
-        pasting = true
-        logMsg("selectAndPaste index=\(index)")
-        // 1. Close panel first (returns focus to previous app since nonactivatingPanel)
-        dismiss()
-        // 2. Copy to clipboard
-        ClipboardManager.shared.copyToClipboard(at: index)
-        // 3. Simulate Cmd+V
-        ClipboardManager.shared.simulatePaste()
-        // Reset after short delay
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.pasting = false
-        }
-    }
-
-    @objc func toggleEnabled(_ sender: NSSwitch) {
-        ClipboardManager.shared.enabled = (sender.state == .on)
-    }
-
-    func dismiss() {
-        removeMonitors()
-        self.orderOut(nil)
-        onDismiss?()
-    }
-
-    private func removeMonitors() {
-        if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
-        if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
-        if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
-    }
-
-    override var canBecomeKey: Bool { true }
-}
-
 // MARK: - App Delegate
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var statusItem: NSStatusItem!
-    var panel: PopupPanel!
     var panelVisible = false
     var eventTap: CFMachPort?
+    private var pasting = false
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         return false
@@ -552,21 +151,168 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 button.title = "V"
                 button.font = NSFont.boldSystemFont(ofSize: 14)
             }
-            button.wantsLayer = true
             button.action = #selector(statusItemClicked)
             button.target = self
-        }
-
-        panel = PopupPanel()
-        panel.onDismiss = { [weak self] in
-            self?.panelVisible = false
-            self?.statusItem.button?.highlight(false)
         }
 
         ClipboardManager.shared.startMonitoring()
         setupHotkey()
         logMsg("Clipotron started, AXTrusted=\(AXIsProcessTrusted())")
     }
+
+    // MARK: - Menu
+
+    func buildMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.delegate = self
+
+        // Header with toggle
+        let headerItem = NSMenuItem()
+        let headerView = NSView(frame: NSRect(x: 0, y: 0, width: 250, height: 30))
+
+        let titleLabel = NSTextField(labelWithString: "Clipotron")
+        titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .bold)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        headerView.addSubview(titleLabel)
+
+        let toggle = NSSwitch()
+        toggle.state = ClipboardManager.shared.enabled ? .on : .off
+        toggle.target = self
+        toggle.action = #selector(toggleEnabled(_:))
+        toggle.translatesAutoresizingMaskIntoConstraints = false
+        headerView.addSubview(toggle)
+
+        NSLayoutConstraint.activate([
+            titleLabel.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 14),
+            titleLabel.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
+            toggle.trailingAnchor.constraint(equalTo: headerView.trailingAnchor, constant: -14),
+            toggle.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
+        ])
+
+        headerItem.view = headerView
+        menu.addItem(headerItem)
+        menu.addItem(.separator())
+
+        // Clipboard items
+        let items = ClipboardManager.shared.history
+        if items.isEmpty {
+            let empty = NSMenuItem(title: "No items", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+        } else {
+            for (i, item) in items.enumerated() {
+                let mi = NSMenuItem(title: item.menuTitle, action: #selector(pasteItem(_:)), keyEquivalent: "\(i + 1)")
+                mi.keyEquivalentModifierMask = [.command]
+                mi.tag = i
+                mi.target = self
+
+                // Thumbnail for images
+                if case .image(let img, _) = item {
+                    let thumb = makeThumbnail(image: img, height: 18)
+                    mi.image = thumb
+                }
+
+                menu.addItem(mi)
+            }
+        }
+
+        menu.addItem(.separator())
+
+        let clearItem = NSMenuItem(title: "Clear", action: #selector(clearHistory), keyEquivalent: "")
+        clearItem.target = self
+        menu.addItem(clearItem)
+
+        let quitItem = NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q")
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        return menu
+    }
+
+    private func makeThumbnail(image: NSImage, height: CGFloat) -> NSImage {
+        let ratio = height / image.size.height
+        let width = image.size.width * ratio
+        let thumbSize = NSSize(width: min(width, 60), height: height)
+        let thumb = NSImage(size: thumbSize)
+        thumb.lockFocus()
+        image.draw(in: NSRect(origin: .zero, size: thumbSize),
+                   from: NSRect(origin: .zero, size: image.size),
+                   operation: .copy, fraction: 1.0)
+        thumb.unlockFocus()
+        return thumb
+    }
+
+    // MARK: - Actions
+
+    @objc func pasteItem(_ sender: NSMenuItem) {
+        let index = sender.tag
+        guard !pasting else { return }
+        guard index >= 0, index < ClipboardManager.shared.history.count else { return }
+        pasting = true
+        logMsg("pasteItem index=\(index)")
+        ClipboardManager.shared.copyToClipboard(at: index)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            ClipboardManager.shared.simulatePaste()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self?.pasting = false
+            }
+        }
+    }
+
+    func pasteItemDirectly(index: Int) {
+        guard !pasting else { return }
+        guard index >= 0, index < ClipboardManager.shared.history.count else { return }
+        pasting = true
+        logMsg("pasteItemDirectly index=\(index)")
+        // Close menu first
+        statusItem.menu?.cancelTracking()
+        ClipboardManager.shared.copyToClipboard(at: index)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            ClipboardManager.shared.simulatePaste()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                self?.pasting = false
+            }
+        }
+    }
+
+    @objc func toggleEnabled(_ sender: NSSwitch) {
+        ClipboardManager.shared.enabled = (sender.state == .on)
+    }
+
+    @objc func clearHistory() {
+        ClipboardManager.shared.history.removeAll()
+    }
+
+    @objc func quitApp() {
+        NSApplication.shared.terminate(nil)
+    }
+
+    // MARK: - Show menu
+
+    func showMenu() {
+        guard let button = statusItem.button else { return }
+        let menu = buildMenu()
+        panelVisible = true
+        statusItem.menu = menu
+        button.performClick(nil)
+        statusItem.menu = nil
+    }
+
+    func togglePanel() {
+        showMenu()
+    }
+
+    @objc func statusItemClicked() {
+        showMenu()
+    }
+
+    // MARK: - NSMenuDelegate
+
+    func menuDidClose(_ menu: NSMenu) {
+        panelVisible = false
+    }
+
+    // MARK: - Hotkey
 
     func setupHotkey() {
         let mask: CGEventMask = (1 << CGEventType.keyDown.rawValue)
@@ -612,7 +358,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     if let idx = numberKeyCodes.firstIndex(of: keyCode),
                        idx < ClipboardManager.shared.history.count {
                         DispatchQueue.main.async {
-                            delegate.panel.selectAndPaste(index: idx)
+                            delegate.pasteItemDirectly(index: idx)
                         }
                         return nil
                     }
@@ -640,29 +386,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
         logMsg("Hotkey Option+V registered")
-    }
-
-    func togglePanel() {
-        if panelVisible {
-            panel.dismiss()
-            return
-        }
-        guard let button = statusItem.button else { return }
-        panelVisible = true
-        panel.showBelow(statusItemButton: button, items: ClipboardManager.shared.history)
-        DispatchQueue.main.async { button.highlight(true) }
-    }
-
-    @objc func statusItemClicked() {
-        if panelVisible {
-            panel.dismiss()
-            return
-        }
-
-        guard let button = statusItem.button else { return }
-        panelVisible = true
-        panel.showBelow(statusItemButton: button, items: ClipboardManager.shared.history)
-        DispatchQueue.main.async { button.highlight(true) }
     }
 }
 
